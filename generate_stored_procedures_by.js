@@ -19,15 +19,16 @@ function toPascalCase(snake) {
 }
 
 function getAllColumns(table) {
-  return [
+  const cols = [
     `${table.name}_id`,
     ...table.columns.map(c => c.name),
-    'is_active',
-    'created_on',
-    'created_by',
-    'modified_on',
-    'modified_by',
+    'modified',
+    'created',
   ];
+  if (table.needsShortId) {
+    cols.push('short_id');
+  }
+  return cols;
 }
 
 function getTableDef(name) {
@@ -77,7 +78,7 @@ function generateListBy(opts) {
   }
   paramLines.push(`    @p_PageNumber INT = 1`);
   paramLines.push(`    @p_PageSize INT = 50`);
-  paramLines.push(`    @p_SortBy NVARCHAR(50) = 'created_on'`);
+  paramLines.push(`    @p_SortBy NVARCHAR(50) = 'created'`);
   paramLines.push(`    @p_SortDirection NVARCHAR(4) = 'DESC'`);
   paramLines.push(`    @p_IncludeInactive BIT = 0`);
 
@@ -91,41 +92,49 @@ function generateListBy(opts) {
   }
   paramDocs.push(`    @p_PageNumber INT = 1 - Page number (1-based)`);
   paramDocs.push(`    @p_PageSize INT = 50 - Number of records per page`);
-  paramDocs.push(`    @p_SortBy NVARCHAR(50) = 'created_on' - Column name to sort by`);
+  paramDocs.push(`    @p_SortBy NVARCHAR(50) = 'created' - Column name to sort by`);
   paramDocs.push(`    @p_SortDirection NVARCHAR(4) = 'DESC' - Sort direction (ASC or DESC)`);
   paramDocs.push(`    @p_IncludeInactive BIT = 0 - If 1, include inactive records in results`);
   paramDocs.push(`    @o_RecordCount INT OUTPUT - Total number of matching records`);
 
-  // sp_executesql parameter declarations
-  const execParamDecls = ['@IncludeInactive BIT', '@PageNumber INT', '@PageSize INT'];
-  const execParamVals = [
-    '@IncludeInactive = @p_IncludeInactive',
-    '@PageNumber = @p_PageNumber',
-    '@PageSize = @p_PageSize',
-  ];
-
-  for (const fp of filterParams) {
-    const cleanName = fp.name.replace('@p_', '@');
-    execParamDecls.push(`${cleanName} ${fp.type}`);
-    execParamVals.push(`${cleanName} = ${fp.name}`);
-  }
+  // Build extra WHERE conditions from extraParams (e.g., date ranges)
+  let extraWhere = '';
   for (const ep of extraParams) {
-    const cleanName = ep.name.replace('@p_', '@');
-    execParamDecls.push(`${cleanName} ${ep.type}`);
-    execParamVals.push(`${cleanName} = ${ep.name}`);
+    if (ep.whereClause) {
+      extraWhere += `\n    AND ${ep.whereClause}`;
+    }
   }
 
-  // Build the WHERE clause for count and dynamic SQL
-  // The filterWhere uses @p_ names for the count query, and clean names for dynamic SQL
-  const countWhere = filterWhere;
-  const dynWhere = filterWhere.replace(/@p_/g, '@');
+  // Build IF/ELSE IF branches for each column + direction combo
+  const branches = [];
+  for (const col of columns) {
+    for (const dir of ['ASC', 'DESC']) {
+      branches.push(`    ${branches.length === 0 ? 'IF' : 'ELSE IF'} @p_SortBy = '${col}' AND @p_SortDirection = '${dir}'
+        SELECT
+${selectList}
+        FROM ${source}
+        WHERE ${filterWhere}
+        AND (is_active = 1 OR @p_IncludeInactive = 1)${extraWhere}
+        ORDER BY ${col} ${dir}
+        OFFSET (@p_PageNumber - 1) * @p_PageSize ROWS FETCH NEXT @p_PageSize ROWS ONLY;`);
+    }
+  }
+  // Default fallback (created DESC)
+  branches.push(`    ELSE
+        SELECT
+${selectList}
+        FROM ${source}
+        WHERE ${filterWhere}
+        AND (is_active = 1 OR @p_IncludeInactive = 1)${extraWhere}
+        ORDER BY created DESC
+        OFFSET (@p_PageNumber - 1) * @p_PageSize ROWS FETCH NEXT @p_PageSize ROWS ONLY;`);
 
   return `/*
 =============================================================================
 Procedure: ${spName}
 Purpose: ${purpose}
 Author: Generated
-Created: 2026-02-18
+Created: 2026-02-22
 
 Parameters:
 ${paramDocs.join('\n')}
@@ -148,7 +157,7 @@ BEGIN
 
     -- Validate sort parameters
     IF @p_SortBy NOT IN (${sortableCols})
-        SET @p_SortBy = 'created_on';
+        SET @p_SortBy = 'created';
 
     IF @p_SortDirection NOT IN ('ASC', 'DESC')
         SET @p_SortDirection = 'DESC';
@@ -156,25 +165,11 @@ BEGIN
     -- Total count
     SELECT @o_RecordCount = COUNT(*)
     FROM ${source}
-    WHERE ${countWhere}
-    AND (is_active = 1 OR @p_IncludeInactive = 1);
+    WHERE ${filterWhere}
+    AND (is_active = 1 OR @p_IncludeInactive = 1)${extraWhere};
 
-    -- Paged results
-    DECLARE @SQL NVARCHAR(MAX);
-
-    SET @SQL = N'
-    SELECT
-${selectList}
-    FROM ${source}
-    WHERE ${dynWhere}
-    AND (is_active = 1 OR @IncludeInactive = 1)
-    ORDER BY ' + QUOTENAME(@p_SortBy) + ' ' + @p_SortDirection + '
-    OFFSET (@PageNumber - 1) * @PageSize ROWS
-    FETCH NEXT @PageSize ROWS ONLY;';
-
-    EXEC sp_executesql @SQL,
-        N'${execParamDecls.join(', ')}',
-        ${execParamVals.join(',\n        ')};
+    -- Paged results (static ORDER BY per column to allow index usage)
+${branches.join('\n')}
 
     SET NOCOUNT OFF;
 END;
@@ -232,12 +227,12 @@ for (const def of spByData.spDefs) {
 
 // Note/Document _by_ parent SPs (dynamic — depends on table existence)
 for (const parent of spByData.noteParents) {
-  const tableName = `note_${parent}`;
+  const tableName = `${parent}_note`;
   const tDef = getTableDef(tableName);
   if (!tDef) continue;
   const paramName = `@p_${toPascalCase(`${parent}_id`)}`;
   spDefs.push({
-    spName: `sx_list_note_${parent}_by_${parent}`,
+    spName: `sx_list_${parent}_note_by_${parent}`,
     source: tableName,
     columns: getAllColumns(tDef),
     purpose: `Retrieves ${tableName} records filtered by ${parent}`,
@@ -247,12 +242,12 @@ for (const parent of spByData.noteParents) {
 }
 
 for (const parent of spByData.documentParents) {
-  const tableName = `document_${parent}`;
+  const tableName = `${parent}_document`;
   const tDef = getTableDef(tableName);
   if (!tDef) continue;
   const paramName = `@p_${toPascalCase(`${parent}_id`)}`;
   spDefs.push({
-    spName: `sx_list_document_${parent}_by_${parent}`,
+    spName: `sx_list_${parent}_document_by_${parent}`,
     source: tableName,
     columns: getAllColumns(tDef),
     purpose: `Retrieves ${tableName} records filtered by ${parent}`,
