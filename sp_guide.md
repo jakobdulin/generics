@@ -312,11 +312,13 @@ Example Usage:
 
 \- Consider query execution plans
 
+\- **Never use CASE expressions for dynamic sorting** — CASE-based ORDER BY prevents the query optimizer from using indexes and makes queries very slow. Always use IF/ELSE IF branching with a separate SELECT for each sort column/direction combination, even though it makes procedures long and repetitive. The optimizer can find indexes in each branch. We do not care about procedure length or repetition.
+
 
 
 \### Security
 
-\- **No dynamic SQL** — never use `EXEC()`, `sp_executesql`, or string-built queries. Use static SQL with `CASE` expressions for conditional logic (e.g., dynamic sort columns). Dynamic SQL breaks ownership chaining and requires direct table permissions.
+\- **No dynamic SQL** — never use `EXEC()`, `sp_executesql`, or string-built queries. Dynamic SQL breaks ownership chaining and requires direct table permissions.
 
 \- Validate all input parameters
 
