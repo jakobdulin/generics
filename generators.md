@@ -30,6 +30,7 @@ Each table gets:
 - `hasHistory` (default `true`) — generates a history table and archive-on-update logic
 - `useNewId` (default `false`) — uses `newid()` instead of `newsequentialid()` for the PK default
 - `naturalKey` — array of column names for upsert natural key lookup
+- `skipModified` (default `false`) — omits the `modified` audit column. The update trigger only blocks edits to `created` and does not auto-stamp `modified`. Use for true append-only tables (ledgers, event logs). The SP generator's `getAllColumns()` honors this flag so generated SELECTs don't reference the missing column.
 
 ### `generate_stored_procedures.js`
 
@@ -106,7 +107,8 @@ Array of table objects:
     { "name": "ix_my_table_col2", "cols": ["col2"] }
   ],
   "hasHistory": true,
-  "useNewId": false
+  "useNewId": false,
+  "skipModified": false
 }
 ```
 

@@ -16,12 +16,10 @@ const tables = require(jsonPath);
 // ============================================================
 
 function getAllColumnNames(table) {
-  return [
-    `${table.name}_id`,
-    ...table.columns.map(c => c.name),
-    'modified',
-    'created',
-  ];
+  const cols = [`${table.name}_id`, ...table.columns.map(c => c.name)];
+  if (!table.skipModified) cols.push('modified');
+  cols.push('created');
+  return cols;
 }
 
 // ============================================================
@@ -54,8 +52,10 @@ function generateSQL(table) {
     colLines.push(line);
   }
 
-  // Audit footer: modified, created
-  colLines.push(`    modified datetime2(7) CONSTRAINT df__${name}__modified__getutcdate DEFAULT (getutcdate()) NOT NULL`);
+  // Audit footer: modified (optional), created
+  if (!table.skipModified) {
+    colLines.push(`    modified datetime2(7) CONSTRAINT df__${name}__modified__getutcdate DEFAULT (getutcdate()) NOT NULL`);
+  }
   colLines.push(`    created datetime2(7) CONSTRAINT df__${name}__created__getutcdate DEFAULT (getutcdate()) NOT NULL`);
 
   // FKs
@@ -95,12 +95,21 @@ function generateSQL(table) {
   lines.push('BEGIN');
   lines.push('    SET NOCOUNT ON;');
   lines.push('');
-  lines.push('    IF UPDATE(created) OR UPDATE(modified)');
-  lines.push('    BEGIN');
-  lines.push(`        RAISERROR('Cannot update created or modified columns directly', 16, 1);`);
-  lines.push('        ROLLBACK;');
-  lines.push('        RETURN;');
-  lines.push('    END');
+  if (table.skipModified) {
+    lines.push('    IF UPDATE(created)');
+    lines.push('    BEGIN');
+    lines.push(`        RAISERROR('Cannot update created column directly', 16, 1);`);
+    lines.push('        ROLLBACK;');
+    lines.push('        RETURN;');
+    lines.push('    END');
+  } else {
+    lines.push('    IF UPDATE(created) OR UPDATE(modified)');
+    lines.push('    BEGIN');
+    lines.push(`        RAISERROR('Cannot update created or modified columns directly', 16, 1);`);
+    lines.push('        ROLLBACK;');
+    lines.push('        RETURN;');
+    lines.push('    END');
+  }
   lines.push('');
 
   if (table.hasHistory) {
@@ -117,11 +126,13 @@ function generateSQL(table) {
     lines.push('');
   }
 
-  lines.push(`    UPDATE ${name}`);
-  lines.push('    SET modified = GETUTCDATE()');
-  lines.push(`    FROM ${name} t`);
-  lines.push(`    INNER JOIN inserted i ON t.${name}_id = i.${name}_id;`);
-  lines.push('');
+  if (!table.skipModified) {
+    lines.push(`    UPDATE ${name}`);
+    lines.push('    SET modified = GETUTCDATE()');
+    lines.push(`    FROM ${name} t`);
+    lines.push(`    INNER JOIN inserted i ON t.${name}_id = i.${name}_id;`);
+    lines.push('');
+  }
   lines.push('    SET NOCOUNT OFF;');
   lines.push('END;');
   lines.push('GO');
@@ -239,16 +250,6 @@ if (require.main === module) {
   }
 
   const HISTORY_DIR = path.join(outputBase, 'TABLES_HISTORY');
-  if (!fs.existsSync(HISTORY_DIR)) {
-    fs.mkdirSync(HISTORY_DIR, { recursive: true });
-  }
-
-  // Schema creation script
-  const schemaSQL = `IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = 'history')
-    EXEC('CREATE SCHEMA history');
-GO
-`;
-  fs.writeFileSync(path.join(HISTORY_DIR, '_create_schema.sql'), schemaSQL, 'utf8');
 
   let mainCount = 0;
   let histCount = 0;
@@ -258,14 +259,29 @@ GO
     mainCount++;
 
     if (table.hasHistory) {
+      if (!fs.existsSync(HISTORY_DIR)) {
+        fs.mkdirSync(HISTORY_DIR, { recursive: true });
+      }
       const histSQL = generateHistorySQL(table);
       fs.writeFileSync(path.join(HISTORY_DIR, `${table.name}.sql`), histSQL, 'utf8');
       histCount++;
     }
   }
+
+  // Schema creation script — only if there are history tables
+  if (histCount > 0) {
+    const schemaSQL = `IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = 'history')
+    EXEC('CREATE SCHEMA history');
+GO
+ALTER AUTHORIZATION ON SCHEMA::history TO dbo;
+GO
+`;
+    fs.writeFileSync(path.join(HISTORY_DIR, '_create_schema.sql'), schemaSQL, 'utf8');
+    console.log(`Generated schema script: ${path.join(HISTORY_DIR, '_create_schema.sql')}`);
+  }
+
   console.log(`Generated ${mainCount} table files in ${TABLES_DIR}`);
   console.log(`Generated ${histCount} history table files in ${HISTORY_DIR}`);
-  console.log(`Generated schema script: ${path.join(HISTORY_DIR, '_create_schema.sql')}`);
 }
 
 module.exports = tables;

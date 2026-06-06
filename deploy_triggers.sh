@@ -55,7 +55,7 @@ echo "Found ${#files[@]} trigger files"
 for file in "${files[@]}"; do
   name=$(basename "$file" .sql)
   echo "  Deploying triggers for $name..."
-  "$SQLCMD" -S "$SERVER" -d "$DATABASE" -U "$USERNAME" -P "$PASSWORD" -C -i "$file"
+  "$SQLCMD" -S "$SERVER" -d "$DATABASE" -U "$USERNAME" -P "$PASSWORD" -C -I -i "$file"
   if [ $? -ne 0 ]; then
     echo "ERROR: Failed to deploy triggers for $name" >&2
   fi

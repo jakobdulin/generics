@@ -70,10 +70,13 @@ function generateListBy(opts) {
     spName, source, columns, purpose,
     filterParams, filterWhere,
     extraParams = [],
+    hasIsActive = false,
   } = opts;
 
   const selectList = columns.map(c => `        ${c}`).join(',\n');
   const sortableCols = columns.map(c => `'${c}'`).join(', ');
+
+  const activeFilter = hasIsActive ? '\n    AND (is_active = 1 OR @p_IncludeInactive = 1)' : '';
 
   // Build parameter list
   const paramLines = [];
@@ -88,7 +91,9 @@ function generateListBy(opts) {
   paramLines.push(`    @p_PageSize INT = 50`);
   paramLines.push(`    @p_SortBy NVARCHAR(50) = 'created'`);
   paramLines.push(`    @p_SortDirection NVARCHAR(4) = 'DESC'`);
-  paramLines.push(`    @p_IncludeInactive BIT = 0`);
+  if (hasIsActive) {
+    paramLines.push(`    @p_IncludeInactive BIT = 0`);
+  }
 
   // Build parameter docs
   const paramDocs = [];
@@ -102,7 +107,9 @@ function generateListBy(opts) {
   paramDocs.push(`    @p_PageSize INT = 50 - Number of records per page`);
   paramDocs.push(`    @p_SortBy NVARCHAR(50) = 'created' - Column name to sort by`);
   paramDocs.push(`    @p_SortDirection NVARCHAR(4) = 'DESC' - Sort direction (ASC or DESC)`);
-  paramDocs.push(`    @p_IncludeInactive BIT = 0 - If 1, include inactive records in results`);
+  if (hasIsActive) {
+    paramDocs.push(`    @p_IncludeInactive BIT = 0 - If 1, include inactive records in results`);
+  }
   paramDocs.push(`    @o_RecordCount INT OUTPUT - Total number of matching records`);
 
   // Build extra WHERE conditions from extraParams (e.g., date ranges)
@@ -121,8 +128,7 @@ function generateListBy(opts) {
         SELECT
 ${selectList}
         FROM ${source}
-        WHERE ${filterWhere}
-        AND (is_active = 1 OR @p_IncludeInactive = 1)${extraWhere}
+        WHERE ${filterWhere}${activeFilter}${extraWhere}
         ORDER BY ${col} ${dir}
         OFFSET (@p_PageNumber - 1) * @p_PageSize ROWS FETCH NEXT @p_PageSize ROWS ONLY;`);
     }
@@ -132,8 +138,7 @@ ${selectList}
         SELECT
 ${selectList}
         FROM ${source}
-        WHERE ${filterWhere}
-        AND (is_active = 1 OR @p_IncludeInactive = 1)${extraWhere}
+        WHERE ${filterWhere}${activeFilter}${extraWhere}
         ORDER BY created DESC
         OFFSET (@p_PageNumber - 1) * @p_PageSize ROWS FETCH NEXT @p_PageSize ROWS ONLY;`);
 
@@ -176,8 +181,7 @@ BEGIN
     -- Total count
     SELECT @o_RecordCount = COUNT(*)
     FROM ${source}
-    WHERE ${filterWhere}
-    AND (is_active = 1 OR @p_IncludeInactive = 1)${extraWhere};
+    WHERE ${filterWhere}${activeFilter}${extraWhere};
 
     -- Paged results (static ORDER BY per column to allow index usage)
 ${branches.join('\n')}
@@ -206,10 +210,17 @@ function resolveColumns(def) {
   return def.columns;
 }
 
+function tableHasIsActive(tableName) {
+  const tDef = getTableDef(tableName);
+  return tDef ? tDef.columns.some(c => c.name === 'is_active') : false;
+}
+
 // Load SP definitions from JSON
 for (const def of spByData.spDefs) {
   const columns = resolveColumns(def);
   if (!columns) continue; // skip if table not found
+
+  const hasIsActive = def.hasIsActive !== undefined ? def.hasIsActive : tableHasIsActive(def.source);
 
   if (def.filterCol) {
     // Simple listBy-style definition
@@ -221,6 +232,7 @@ for (const def of spByData.spDefs) {
       purpose: def.purpose,
       filterParams: [{ name: paramName, type: def.filterType, desc: `Filter by ${def.filterCol}` }],
       filterWhere: `${def.filterCol} = ${paramName}`,
+      hasIsActive,
     });
   } else {
     // Custom definition with explicit filterParams/filterWhere
@@ -232,6 +244,7 @@ for (const def of spByData.spDefs) {
       filterParams: def.filterParams || [],
       extraParams: def.extraParams,
       filterWhere: def.filterWhere,
+      hasIsActive,
     });
   }
 }
@@ -249,6 +262,7 @@ for (const parent of spByData.noteParents) {
     purpose: `Retrieves ${tableName} records filtered by ${parent}`,
     filterParams: [{ name: paramName, type: 'UNIQUEIDENTIFIER', desc: `Filter by ${parent}_id` }],
     filterWhere: `${parent}_id = ${paramName}`,
+    hasIsActive: tableHasIsActive(tableName),
   });
 }
 
@@ -264,6 +278,7 @@ for (const parent of spByData.documentParents) {
     purpose: `Retrieves ${tableName} records filtered by ${parent}`,
     filterParams: [{ name: paramName, type: 'UNIQUEIDENTIFIER', desc: `Filter by ${parent}_id` }],
     filterWhere: `${parent}_id = ${paramName}`,
+    hasIsActive: tableHasIsActive(tableName),
   });
 }
 

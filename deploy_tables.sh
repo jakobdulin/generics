@@ -58,7 +58,7 @@ fi
 run_sql() {
   local file="$1"
   echo "  Deploying $file..."
-  "$SQLCMD" -S "$SERVER" -d "$DATABASE" -U "$USERNAME" -P "$PASSWORD" -C -i "$file"
+  "$SQLCMD" -S "$SERVER" -d "$DATABASE" -U "$USERNAME" -P "$PASSWORD" -C -I -i "$file"
   if [ $? -ne 0 ]; then
     echo "ERROR: Failed to deploy $file" >&2
     exit 1
@@ -100,6 +100,31 @@ else
   else
     echo "No tables.json specified, deploying TABLES/*.sql alphabetically..."
     for f in TABLES/*.sql; do
+      run_sql "$f"
+    done
+  fi
+fi
+
+# Deploy history tables if TABLES_HISTORY/ exists and has .sql files
+if [ -d "TABLES_HISTORY" ] && ls TABLES_HISTORY/*.sql 1>/dev/null 2>&1; then
+  # Run schema creation first if it exists
+  if [ -f "TABLES_HISTORY/_create_schema.sql" ]; then
+    echo "Creating history schema..."
+    run_sql "TABLES_HISTORY/_create_schema.sql"
+  fi
+
+  echo "Deploying history tables..."
+  if [[ -n "$TABLES_JSON" ]]; then
+    for table in $(jq -r '.[] | select(.hasHistory) | .name' "$TABLES_JSON"); do
+      if [ -f "TABLES_HISTORY/${table}.sql" ]; then
+        run_sql "TABLES_HISTORY/${table}.sql"
+      else
+        echo "WARNING: TABLES_HISTORY/${table}.sql not found, skipping" >&2
+      fi
+    done
+  else
+    for f in TABLES_HISTORY/*.sql; do
+      [ "$(basename "$f")" = "_create_schema.sql" ] && continue
       run_sql "$f"
     done
   fi

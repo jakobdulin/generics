@@ -56,7 +56,7 @@ fi
 run_sql() {
   local file="$1"
   echo "  Deploying $file..."
-  "$SQLCMD" -S "$SERVER" -d "$DATABASE" -U "$USERNAME" -P "$PASSWORD" -C -i "$file"
+  "$SQLCMD" -S "$SERVER" -d "$DATABASE" -U "$USERNAME" -P "$PASSWORD" -C -I -i "$file"
   if [ $? -ne 0 ]; then
     echo "ERROR: Failed to deploy $file" >&2
     exit 1

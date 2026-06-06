@@ -44,15 +44,18 @@ function generateHandler(table) {
   const name = table.name;
   const displayName = name.replace(/_/g, ' ');
   const pk = pkParamName(table);
+  const pkCamel = toCamelCase(`${name}_id`);
   const cols = table.columns;
 
-  // Build FIELDS bitmask map
+  // Build FIELDS bitmask map (use BigInt for tables with >31 columns)
+  const needsBigint = cols.length > 31;
   const fieldLines = [];
   cols.forEach((col, i) => {
     const camel = toCamelCase(col.name);
-    const bit = 1 << i;
+    const bit = String(1n << BigInt(i));
+    const suffix = needsBigint ? 'n' : '';
     const pad = ' '.repeat(Math.max(1, 30 - camel.length));
-    fieldLines.push(`    ${camel}:${pad}${bit},${' '.repeat(Math.max(1, 10 - String(bit).length))}// Bit ${i}: 2^${i} = ${bit}`);
+    fieldLines.push(`    ${camel}:${pad}${bit}${suffix},${' '.repeat(Math.max(1, 10 - String(bit).length))}// Bit ${i}: 2^${i} = ${bit}`);
   });
 
   // Build destructure list for upsert
@@ -86,17 +89,34 @@ function generateHandler(table) {
   lines.push(`};`);
   lines.push(``);
 
+  // --- toCamelCase helper (inline) ---
+  lines.push(`function toCamelCase(snake) {`);
+  lines.push(`    const parts = snake.split('_');`);
+  lines.push(`    return parts[0] + parts.slice(1).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('');`);
+  lines.push(`}`);
+  lines.push(``);
+  lines.push(`function camelizeRecord(record) {`);
+  lines.push(`    if (!record) return record;`);
+  lines.push(`    const out = {};`);
+  lines.push(`    for (const [key, value] of Object.entries(record)) {`);
+  lines.push(`        out[toCamelCase(key)] = value;`);
+  lines.push(`    }`);
+  lines.push(`    return out;`);
+  lines.push(`}`);
+  lines.push(``);
+
   // --- get ---
+  const hasActive = table.columns.some(c => c.name === 'is_active');
   lines.push(`async function get(id, queryParams = {}) {`);
   lines.push(`    if (!id) return errorResponse('${displayName} ID is required', 400);`);
   lines.push(``);
   lines.push(`    try {`);
   lines.push(`        const results = await executeStoredProc('sx_get_${name}', {`);
-  lines.push(`            ${pk}: id`);
+  lines.push(`            ${pk}: id${hasActive ? ",\n            p_IncludeInactive: queryParams.includeInactive === 'true'" : ''}`);
   lines.push(`        });`);
   lines.push(``);
   lines.push(`        if (!results || results.length === 0) return notFoundResponse('${displayName}');`);
-  lines.push(`        return successResponse(results[0]);`);
+  lines.push(`        return successResponse(camelizeRecord(results[0]));`);
   lines.push(`    } catch (error) {`);
   lines.push(`        console.error('Error getting ${name}:', error);`);
   lines.push(`        return errorResponse('Failed to get ${displayName}', 500, error.message);`);
@@ -119,7 +139,7 @@ function generateHandler(table) {
   lines.push(`        );`);
   lines.push(``);
   lines.push(`        return successResponse({`);
-  lines.push(`            records: recordset,`);
+  lines.push(`            records: recordset.map(camelizeRecord),`);
   lines.push(`            totalCount: output.o_RecordCount,`);
   lines.push(`            page: parseInt(queryParams.page) || 1,`);
   lines.push(`            pageSize: parseInt(queryParams.pageSize) || 50`);
@@ -143,7 +163,7 @@ function generateHandler(table) {
   lines.push(`    }`);
   lines.push(``);
   lines.push(`    try {`);
-  lines.push(`        const { output } = await executeStoredProcWithOutput(`);
+  lines.push(`        const { output, recordset } = await executeStoredProcWithOutput(`);
   lines.push(`            'sx_upsert_${name}',`);
   lines.push(`            {`);
   lines.push(upsertParams.join(',\n'));
@@ -160,7 +180,7 @@ function generateHandler(table) {
   lines.push(`        }`);
   lines.push(``);
   lines.push(`        const statusCode = id ? 200 : 201;`);
-  lines.push(`        return successResponse({ id: output.o_NewRecordId }, statusCode);`);
+  lines.push(`        return successResponse(recordset.length > 0 ? camelizeRecord(recordset[0]) : { ${pkCamel}: output.o_NewRecordId }, statusCode);`);
   lines.push(`    } catch (error) {`);
   lines.push(`        console.error('Error upserting ${name}:', error);`);
   lines.push(`        return errorResponse('Failed to save ${displayName}', 500, error.message);`);
@@ -168,8 +188,39 @@ function generateHandler(table) {
   lines.push(`}`);
   lines.push(``);
 
+  // --- remove (soft delete, only for tables with is_active) ---
+  if (hasActive) {
+    lines.push(`async function remove(id) {`);
+    lines.push(`    if (!id) return errorResponse('${displayName} ID is required', 400);`);
+    lines.push(``);
+    lines.push(`    try {`);
+    lines.push(`        const { output } = await executeStoredProcWithOutput(`);
+    lines.push(`            'sx_delete_${name}',`);
+    lines.push(`            { ${pk}: id },`);
+    lines.push(`            {`);
+    lines.push(`                o_IsSuccess: sql.Bit,`);
+    lines.push(`                o_ErrorMessage: sql.NVarChar(255)`);
+    lines.push(`            }`);
+    lines.push(`        );`);
+    lines.push(``);
+    lines.push(`        if (!output.o_IsSuccess) {`);
+    lines.push(`            return errorResponse(output.o_ErrorMessage || 'Failed to delete ${displayName}', 400);`);
+    lines.push(`        }`);
+    lines.push(``);
+    lines.push(`        return successResponse({ message: '${displayName} deactivated successfully' });`);
+    lines.push(`    } catch (error) {`);
+    lines.push(`        console.error('Error deleting ${name}:', error);`);
+    lines.push(`        return errorResponse('Failed to delete ${displayName}', 500, error.message);`);
+    lines.push(`    }`);
+    lines.push(`}`);
+    lines.push(``);
+  }
+
   // --- exports ---
-  lines.push(`module.exports = { get, list, upsert, FIELDS };`);
+  const exports = hasActive
+    ? `module.exports = { get, list, upsert, remove, FIELDS };`
+    : `module.exports = { get, list, upsert, FIELDS };`;
+  lines.push(exports);
   lines.push(``);
 
   return lines.join('\n');

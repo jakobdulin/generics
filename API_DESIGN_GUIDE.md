@@ -767,6 +767,33 @@ aws lambda add-permission \
 
 The AWS Console and SAM add both automatically. The CLI does not.
 
+### Function URL CORS — Do NOT Enable
+
+When creating a Lambda Function URL, **do not configure CORS on the Function URL itself** (pass `--cors '{}'` or omit it entirely). Our Lambda code already sets `Access-Control-Allow-Origin` and other CORS headers in `response-formatter.js` and handles `OPTIONS` preflight in `lambda-function.js`.
+
+If the Function URL also has CORS enabled, AWS adds its own `Access-Control-Allow-Origin` header **in addition to** the one from our Lambda response. Browsers reject responses with duplicate `Access-Control-Allow-Origin` values, causing all cross-origin requests to fail with:
+
+> *The 'Access-Control-Allow-Origin' header contains multiple values, but only one is allowed.*
+
+```bash
+# CORRECT: no CORS on Function URL (Lambda handles it)
+aws lambda create-function-url-config \
+  --function-name my-func \
+  --auth-type NONE
+
+# WRONG: this causes duplicate CORS headers
+aws lambda create-function-url-config \
+  --function-name my-func \
+  --auth-type NONE \
+  --cors '{"AllowOrigins":["*"],"AllowMethods":["*"],"AllowHeaders":["*"]}'
+
+# FIX: if CORS was already enabled, remove it
+aws lambda update-function-url-config \
+  --function-name my-func \
+  --auth-type NONE \
+  --cors '{}'
+```
+
 ### Deployment Checklist
 
 - [ ] RDS database is accessible (test connection)
